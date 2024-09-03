@@ -1,171 +1,236 @@
-use application_command::ApplicationCommandOptionType;
-use message_component::ButtonStyle;
-use serenity::{
-    async_trait,
-    client::{bridge::gateway::GatewayIntents, Context, EventHandler},
-    model::{
-        interactions::{
-            application_command::ApplicationCommandInteraction, InteractionResponseType,
-        },
-        prelude::*,
-    },
-    prelude::*,
-};
-
+use dotenv::dotenv;
+use serenity::async_trait;
+use serenity::client::{Client, Context, EventHandler};
+use serenity::framework::standard::macros::{command, group};
+use serenity::framework::standard::{CommandResult, StandardFramework};
+use serenity::model::application::command::CommandOptionType;
+use serenity::model::application::component::ButtonStyle;
+use serenity::model::application::interaction::application_command::ApplicationCommandInteraction;
+use serenity::model::application::interaction::{Interaction, InteractionResponseType};
+use serenity::model::prelude::*;
+use serenity::prelude::*;
 use std::collections::HashMap;
+use std::env;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use uuid::Uuid;
 
-// Botのイベントハンドラを定義
-struct Handler;
+#[command]
+async fn ping(ctx: &Context, msg: &Message) -> CommandResult {
+    msg.channel_id.say(&ctx.http, "pong!").await?;
+    Ok(())
+}
+
+#[group]
+#[commands(ping)]
+struct General;
+
+struct RecruitData {
+    title: String,
+    remaining_count: i64,
+}
+
+struct Handler {
+    recruit_map: Arc<Mutex<HashMap<String, RecruitData>>>,
+}
+
+impl Handler {
+    fn new() -> Handler {
+        Handler {
+            recruit_map: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+}
 
 #[async_trait]
 impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
         println!("{} is connected!", ready.user.name);
 
-        // スラッシュコマンドをサーバーに登録
-        GuildId(ready.guilds[0].id().0)
-            .create_application_command(&ctx.http, |command| {
+        let guild_id = GuildId(ready.guilds[0].id.0);
+        let _commands = GuildId::set_application_commands(&guild_id, &ctx.http, |commands| {
+            commands.create_application_command(|command| {
                 command
                     .name("recruit")
-                    .description("メンバーを募集する")
+                    .description("メンバーを募集します")
                     .create_option(|option| {
                         option
-                            .name("人数")
-                            .description("募集する人数")
-                            .kind(ApplicationCommandOptionType::Integer)
+                            .name("recruit_title")
+                            .description("募集したいものを選択してください")
+                            .kind(CommandOptionType::String)
                             .required(true)
+                            .add_string_choice("StreetFighter 6", "StreetFighter 6")
+                            .add_string_choice("Valorant", "Valorant")
+                            .add_string_choice("OverWatch 2", "OverWatch 2")
+                            .add_string_choice("映画鑑賞", "映画鑑賞")
                     })
                     .create_option(|option| {
                         option
-                            .name("ゲーム")
-                            .description("遊びたいゲームタイトル")
-                            .kind(ApplicationCommandOptionType::String)
+                            .name("recruiting_count")
+                            .description("人数を入力してください")
+                            .kind(CommandOptionType::Integer)
                             .required(true)
-                    })
-                    .create_option(|option| {
-                        option
-                            .name("コメント")
-                            .description("メッセージに追加するコメント（任意）")
-                            .kind(ApplicationCommandOptionType::String)
-                            .required(false)
                     })
             })
-            .await
-            .expect("Could not create slash command");
+        })
+        .await
+        .unwrap();
     }
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
-        if let Interaction::ApplicationCommand(command) = interaction {
-            if command.data.name == "recruit" {
-                handle_recruit_command(&ctx, &command).await;
+        match interaction {
+            Interaction::ApplicationCommand(command) => {
+                if command.data.name.as_str() == "recruit" {
+                    handle_recruit_command(&ctx, &command, &self.recruit_map).await;
+                }
             }
+            Interaction::MessageComponent(component) => {
+                let custom_id = component.data.custom_id.clone();
+                let mut recruit_map = self.recruit_map.lock().await;
+
+                if let Some(recruit_data) = recruit_map.get_mut(&custom_id) {
+                    recruit_data.remaining_count -= 1;
+
+                    if recruit_data.remaining_count > 0 {
+                        if let Err(err) = component
+                            .create_interaction_response(&ctx.http, |response| {
+                                let text = format!(
+                                    "{}さんが参加します。のこり{}人募集しています。",
+                                    component.user.name, recruit_data.remaining_count
+                                );
+                                response
+                                    .kind(InteractionResponseType::ChannelMessageWithSource)
+                                    .interaction_response_data(|message| message.content(text))
+                            })
+                            .await
+                        {
+                            println!("Error sending response: {:?}", err);
+                        }
+                    } else {
+                        if let Err(err) = component
+                            .create_interaction_response(&ctx.http, |response| {
+                                let text = format!(
+                                    "{}さんが参加します。のこり0人です。募集を締め切ります。",
+                                    component.user.name
+                                );
+                                response
+                                    .kind(InteractionResponseType::ChannelMessageWithSource)
+                                    .interaction_response_data(|message| message.content(text))
+                            })
+                            .await
+                        {
+                            println!("Error sending response: {:?}", err);
+                        }
+
+                        if let Err(err) = component.message.delete(&ctx.http).await {
+                            println!("Error deleting message: {:?}", err);
+                        }
+                        recruit_map.remove(&custom_id);
+                    }
+                } else if custom_id.ends_with("_cancel") {
+                    let recruit_id = custom_id.trim_end_matches("_cancel");
+
+                    if let Some(recruit_data) = recruit_map.remove(recruit_id) {
+                        if let Err(err) = component
+                            .create_interaction_response(&ctx.http, |response| {
+                                let text = format!("{}の募集を停止しました。", recruit_data.title);
+                                response
+                                    .kind(InteractionResponseType::ChannelMessageWithSource)
+                                    .interaction_response_data(|message| message.content(text))
+                            })
+                            .await
+                        {
+                            println!("Error sending cancel response: {:?}", err);
+                        }
+
+                        if let Err(err) = component.message.delete(&ctx.http).await {
+                            println!("Error deleting message: {:?}", err);
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
 }
 
-// 募集コマンドの処理関数
-async fn handle_recruit_command(ctx: &Context, command: &ApplicationCommandInteraction) {
-    // 引数の取得
-    let num_needed = command
+async fn handle_recruit_command(
+    ctx: &Context,
+    command: &ApplicationCommandInteraction,
+    recruit_map: &Arc<Mutex<HashMap<String, RecruitData>>>,
+) {
+    let recruit_title = command
         .data
         .options
         .get(0)
-        .and_then(|opt| opt.value.as_ref())
-        .unwrap()
-        .as_i64()
-        .unwrap();
-    let game_title = command
+        .and_then(|opt| opt.value.as_ref().map(|v| v.as_str().unwrap()))
+        .unwrap_or("未設定");
+    let recruiting_count = command
         .data
         .options
         .get(1)
-        .and_then(|opt| opt.value.as_ref())
-        .unwrap()
-        .as_str()
-        .unwrap();
-    let comment = command
-        .data
-        .options
-        .get(2)
-        .and_then(|opt| opt.value.as_ref())
-        .map(|val| val.as_str().unwrap())
-        .unwrap_or("");
+        .and_then(|opt| opt.value.as_ref().map(|v| v.as_i64().unwrap()))
+        .unwrap_or(0);
 
-    // 募集メッセージの送信
-    let response_content = format!(
-        "@{}さんが{}人募集しています。\n{}",
-        game_title, num_needed, comment
+    let recruit_id = Uuid::new_v4().to_string();
+
+    recruit_map.lock().await.insert(
+        recruit_id.clone(),
+        RecruitData {
+            title: recruit_title.to_string(),
+            remaining_count: recruiting_count,
+        },
     );
 
-    // メッセージを返信
-    command
+    let content = format!(
+        "メンバー募集\n募集タイトル： {}, 人数： {}人",
+        recruit_title, recruiting_count
+    );
+
+    if let Err(err) = command
         .create_interaction_response(&ctx.http, |response| {
             response
                 .kind(InteractionResponseType::ChannelMessageWithSource)
                 .interaction_response_data(|message| {
-                    message
-                        .content(response_content)
-                        .allowed_mentions(|mentions| {
-                            mentions.empty_parse() // メンションのパースを空にして安全に処理する
-                        })
-                        .components(|components| {
-                            components.create_action_row(|row| {
-                                row.create_button(|button| {
-                                    button
-                                        .label("参加")
-                                        .style(ButtonStyle::Success)
-                                        .custom_id("participate")
-                                })
-                                .create_button(|button| {
-                                    button
-                                        .label("キャンセル")
-                                        .style(ButtonStyle::Danger)
-                                        .custom_id("cancel")
-                                })
+                    message.content(content).components(|components| {
+                        components.create_action_row(|row| {
+                            row.create_button(|button| {
+                                button
+                                    .custom_id(recruit_id.clone())
+                                    .label("参加する")
+                                    .style(ButtonStyle::Primary)
+                            })
+                            .create_button(|button| {
+                                button
+                                    .custom_id(format!("{}_cancel", recruit_id))
+                                    .label("募集を中断")
+                                    .style(ButtonStyle::Danger)
                             })
                         })
+                    })
                 })
         })
         .await
-        .unwrap();
-}
-
-// Recruitmentデータ構造体の定義
-struct Recruitment {
-    author: UserId,
-    game_title: String,
-    num_needed: i64,
-    participants: Vec<UserId>,
-}
-
-// BotData構造体の定義
-struct BotData {
-    recruitments: serenity::prelude::Mutex<HashMap<MessageId, Recruitment>>, // serenity::prelude::Mutexを使用
-}
-
-// TypeMapKeyトレイトをBotDataに実装する
-impl TypeMapKey for BotData {
-    type Value = serenity::prelude::Mutex<HashMap<MessageId, Recruitment>>;
+    {
+        println!("Error sending interaction response: {:?}", err);
+    }
 }
 
 #[tokio::main]
 async fn main() {
-    // Discordのゲートウェイインテントを設定
-    let intents = GatewayIntents::GUILD_MEMBERS | GatewayIntents::GUILD_MESSAGES;
+    dotenv().ok();
+    let token = env::var("DISCORD_TOKEN").expect("Expected a token in the environment");
+    let framework = StandardFramework::new()
+        .configure(|c| c.prefix("~"))
+        .group(&GENERAL_GROUP);
+    let intents = GatewayIntents::GUILD_MESSAGES | GatewayIntents::MESSAGE_CONTENT;
 
-    // クライアントの構築
-    let mut client = Client::builder("")
-        .intents(intents)
-        .event_handler(Handler)
+    let mut client = Client::builder(token, intents)
+        .event_handler(Handler::new())
+        .framework(framework)
         .await
         .expect("Error creating client");
 
-    // BotDataを初期化してクライアントに登録
-    {
-        let mut data = client.data.write().await;
-        data.insert::<BotData>(serenity::prelude::Mutex::new(HashMap::new())); // serenity::prelude::Mutexを使用
-    }
-
-    // クライアントを起動
     if let Err(why) = client.start().await {
         println!("Client error: {:?}", why);
     }
