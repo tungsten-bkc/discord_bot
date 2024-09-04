@@ -182,9 +182,29 @@ async fn handle_recruit_command(
         },
     );
 
+    let role_mention = if recruit_title == "なんでも" {
+        "@everyone".to_string()
+    } else {
+        if let Some(guild_id) = command.guild_id {
+            match ctx.http.get_guild(guild_id.into()).await {
+                Ok(guild) => {
+                    // ロールを名前で検索
+                    let role = guild.roles.values().find(|role| role.name == recruit_title);
+                    match role {
+                        Some(role) => format!("<@&{}>", role.id),
+                        None => "該当するロールが見つかりません".to_string(),
+                    }
+                }
+                Err(_) => "ギルド情報の取得に失敗しました".to_string(),
+            }
+        } else {
+            "ギルド情報が見つかりません".to_string()
+        }
+    };
+
     let content = format!(
-        "メンバー募集\n募集タイトル： {}, 人数： {}人",
-        recruit_title, recruiting_count
+        "{}\nメンバー募集\n募集タイトル： {}, 人数： {}人",
+        role_mention, recruit_title, recruiting_count
     );
 
     if let Err(err) = command
@@ -219,9 +239,7 @@ async fn handle_recruit_command(
 #[tokio::main]
 async fn main() {
     dotenv().ok();
-
     let token = env::var("DISCORD_TOKEN").expect("Expected a token in the environment");
-
     let framework = StandardFramework::new()
         .configure(|c| c.prefix("~"))
         .group(&GENERAL_GROUP);
