@@ -3,7 +3,7 @@ use serenity::async_trait;
 use serenity::client::{Client, Context, EventHandler};
 use serenity::framework::standard::macros::{command, group};
 use serenity::framework::standard::{CommandResult, StandardFramework};
-use serenity::model::application::command::CommandOptionType;
+use serenity::model::application::command::{Command, CommandOptionType};
 use serenity::model::application::component::ButtonStyle;
 use serenity::model::application::interaction::application_command::ApplicationCommandInteraction;
 use serenity::model::application::interaction::{Interaction, InteractionResponseType};
@@ -47,8 +47,7 @@ impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
         println!("{} is connected!", ready.user.name);
 
-        let guild_id = GuildId(ready.guilds[0].id.0);
-        let _commands = GuildId::set_application_commands(&guild_id, &ctx.http, |commands| {
+        let _commands = Command::set_global_application_commands(&ctx.http, |commands| {
             commands.create_application_command(|command| {
                 command
                     .name("recruit")
@@ -63,6 +62,7 @@ impl EventHandler for Handler {
                             .add_string_choice("Valorant", "Valorant")
                             .add_string_choice("OverWatch 2", "OverWatch 2")
                             .add_string_choice("映画鑑賞", "映画鑑賞")
+                            .add_string_choice("なんでも", "なんでも")
                     })
                     .create_option(|option| {
                         option
@@ -219,13 +219,15 @@ async fn handle_recruit_command(
 #[tokio::main]
 async fn main() {
     dotenv().ok();
+
     let token = env::var("DISCORD_TOKEN").expect("Expected a token in the environment");
+
     let framework = StandardFramework::new()
         .configure(|c| c.prefix("~"))
         .group(&GENERAL_GROUP);
     let intents = GatewayIntents::GUILD_MESSAGES | GatewayIntents::MESSAGE_CONTENT;
 
-    let mut client = Client::builder(token, intents)
+    let mut client = Client::builder(&token, intents)
         .event_handler(Handler::new())
         .framework(framework)
         .await
