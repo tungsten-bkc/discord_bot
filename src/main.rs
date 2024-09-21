@@ -62,6 +62,7 @@ impl EventHandler for Handler {
                             .add_string_choice("Valorant", "Valorant")
                             .add_string_choice("OverWatch 2", "OverWatch 2")
                             .add_string_choice("映画鑑賞", "映画鑑賞")
+                            .add_string_choice("Deadlock", "Deadlock")
                             .add_string_choice("なんでも", "なんでも")
                     })
                     .create_option(|option| {
